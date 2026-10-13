@@ -2,13 +2,17 @@ import streamlit as st
 from sarvamai import SarvamAI
 import os
 import tempfile
+import random
+import mimetypes
+
+# Prevent audio MIME type errors on Linux servers
+mimetypes.add_type('audio/wav', '.wav')
 
 # -----------------------------------------------------------------------------
-# 1. API KEY SETUP & SECURE LOAD
+# 1. API SETUP & SECRETS
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="My English Character", layout="centered")
+st.set_page_config(page_title="Audio Spelling Tutor", layout="centered")
 
-# Securely fetch the API key from Streamlit Secrets (Cloud) or local environment
 try:
     api_key = st.secrets["SARVAM_API_KEY"]
 except (KeyError, FileNotFoundError):
@@ -21,37 +25,31 @@ if not api_key:
 client = SarvamAI(api_subscription_key=api_key)
 
 # -----------------------------------------------------------------------------
-# 2. SYSTEM PROMPT (Strict Grammar Enforcement)
+# 2. WORD BANK & SESSION STATE
 # -----------------------------------------------------------------------------
-SYSTEM_PROMPT = """You are a strict English grammar corrector. 
-Listen to the user's input and evaluate the grammar.
-- If the sentence has a grammatical error, return ONLY the corrected English sentence. (Example: If user says 'I am going to my home yesterday', you output 'I went to my home yesterday.')
-- If the sentence is already grammatically correct, output ONLY: 'The sentence is correct.'
-- Do NOT provide explanations, greetings, or any other conversational text."""
+# A starter list of words that are commonly misspelled
+WORD_BANK = [
+    "accommodation", "rhythm", "embarrass", "fluorescent", 
+    "necessary", "pronunciation", "fascinating", "restaurant",
+    "mischievous", "definitely"
+]
 
-if 'messages' not in st.session_state:
-    st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+def init_new_word():
+    """Selects a new word and resets the UI state."""
+    st.session_state.current_word = random.choice(WORD_BANK)
+    st.session_state.word_audio = generate_tts(f"Please spell the word: {st.session_state.current_word}")
+    st.session_state.feedback_text = None
+    st.session_state.feedback_audio = None
+    st.session_state.is_correct = False
+
+if 'current_word' not in st.session_state:
+    init_new_word()
 
 # -----------------------------------------------------------------------------
 # 3. SARVAM API WRAPPERS
 # -----------------------------------------------------------------------------
-def transcribe_audio_bytes(audio_bytes) -> str:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        tmp.write(audio_bytes)
-        tmp_path = tmp.name
-
-    with open(tmp_path, "rb") as f:
-        # Using Saaras to transcribe the spoken English
-        response = client.speech_to_text.transcribe(
-            file=f,
-            model="saaras:v4",
-            mode="transcribe"
-        )
-    os.remove(tmp_path)
-    return response.transcript
-
-def generate_audio_response(text: str) -> str:
-    # Using Bulbul to speak the corrected English sentence back
+def generate_tts(text: str) -> str:
+    """Generates Text-to-Speech audio and returns the temporary file path."""
     response = client.text_to_speech.convert_stream(
         text=text,
         language_code="en-IN", 
@@ -60,54 +58,98 @@ def generate_audio_response(text: str) -> str:
         pace=1
     )
     
-    tmp_path = os.path.join(tempfile.gettempdir(), "english_character_response.mp3")
-    with open(tmp_path, "wb") as f:
-        for chunk in response:
-            if chunk:
-                f.write(chunk)
-                
+    # Hash the text to create a unique filename so we don't regenerate existing audio
+    tmp_path = os.path.join(tempfile.gettempdir(), f"spelling_{hash(text)}.mp3")
+    if not os.path.exists(tmp_path):
+        with open(tmp_path, "wb") as f:
+            for chunk in response:
+                if chunk:
+                    f.write(chunk)
     return tmp_path
 
+def evaluate_spelling(target: str, attempt: str) -> str:
+    """Sends the target and attempt to the LLM for phonetic evaluation."""
+    system_prompt = """You are an expert English phonetics and spelling tutor.
+    You will be given a TARGET WORD and the USER'S ATTEMPT.
+    
+    If the attempt is CORRECT:
+    - Briefly congratulate them.
+    
+    If the attempt is INCORRECT:
+    - Do NOT just tell them the correct spelling right away.
+    - Break the word down into its syllables and phonetic sounds.
+    - Explain any tricky spelling rules, silent letters, or origins that explain why it is spelled that way.
+    - Guide them on how to map the sounds to the correct letters.
+    - Keep your tone warm, encouraging, and conversational so it sounds natural when spoken aloud."""
+
+    user_prompt = f"TARGET WORD: {target}\nUSER'S ATTEMPT: {attempt}"
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
+
+    response = client.chat.completions(
+        model="sarvam-105b-conversations", 
+        messages=messages,
+        temperature=0.3
+    )
+    
+    return response.choices[0].message.content
+
 # -----------------------------------------------------------------------------
-# 4. STREAMLIT FRONTEND
+# 4. STREAMLIT UI WORKFLOW
 # -----------------------------------------------------------------------------
-st.title("🗣️ My English Character")
-st.markdown("Speak or type a sentence, and I will correct your grammar.")
+st.title("🎧 Interactive Spelling Tutor")
+st.markdown("Listen to the word, type what you hear, and learn the phonetics behind it!")
 
-audio_value = st.audio_input("Record your sentence:")
-text_value = st.text_input("Or type your sentence here:")
+# Step 1: Audio-First Word Presentation (Text remains hidden)
+st.write("### 1. Listen to the word")
+st.audio(st.session_state.word_audio, format="audio/mp3")
 
-user_input = None
+# Step 2: User Input
+st.write("### 2. Type your spelling")
+with st.form("spelling_form"):
+    user_attempt = st.text_input("How do you spell it?", key="user_input")
+    submitted = st.form_submit_button("Submit")
 
-if audio_value:
-    with st.spinner("Transcribing..."):
-        try:
-            user_input = transcribe_audio_bytes(audio_value.getvalue())
-            st.info(f"**You said:** {user_input}")
-        except Exception as e:
-            st.error(f"Transcription Error: {e}")
-elif text_value:
-    user_input = text_value
-
-if user_input:
-    with st.spinner("Checking grammar..."):
-        # Temporarily append user input for this single turn
-        current_messages = st.session_state.messages.copy()
-        current_messages.append({"role": "user", "content": user_input})
+# Step 3 & 4: LLM Evaluation and Phonetic Logic
+if submitted and user_attempt:
+    with st.spinner("Analyzing your spelling..."):
+        # Check strict correctness for state management
+        if user_attempt.strip().lower() == st.session_state.current_word.lower():
+            st.session_state.is_correct = True
+        else:
+            st.session_state.is_correct = False
+            
+        # Get teaching response from LLM
+        feedback = evaluate_spelling(st.session_state.current_word, user_attempt)
+        st.session_state.feedback_text = feedback
         
-        try:
-            response = client.chat.completions(
-                model="sarvam-105b-conversations", 
-                messages=current_messages,
-                temperature=0.1
-            )
-            
-            final_text = response.choices[0].message.content
-            st.success(f"**Correction:** {final_text}")
-            
-            with st.spinner("Generating voice..."):
-                audio_file = generate_audio_response(final_text)
-                st.audio(audio_file, format="audio/mp3")
-                
-        except Exception as e:
-            st.error(f"Error: {e}")
+        # Step 5: Multimodal Feedback Generation
+        st.session_state.feedback_audio = generate_tts(feedback)
+
+# Display the Feedback
+if st.session_state.feedback_text:
+    st.divider()
+    st.write("### Tutor Feedback")
+    
+    if st.session_state.is_correct:
+        st.success(st.session_state.feedback_text)
+    else:
+        st.warning(st.session_state.feedback_text)
+        
+    st.audio(st.session_state.feedback_audio, format="audio/mp3", autoplay=True)
+
+# Step 6: Session State & Next Word Logic
+if st.session_state.is_correct:
+    st.balloons()
+    if st.button("🎉 Next Word", use_container_width=True):
+        init_new_word()
+        st.rerun()
+elif st.session_state.feedback_text and not st.session_state.is_correct:
+    if st.button("Try typing it again", use_container_width=True):
+        # Clears feedback to let them try the same word again
+        st.session_state.feedback_text = None
+        st.session_state.feedback_audio = None
+        st.rerun()
