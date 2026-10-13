@@ -48,7 +48,7 @@ def generate_tts(text: str) -> str:
 
 def evaluate_spelling(target: str, attempt: str) -> str:
     """Sends the target and attempt to the LLM for phonetic evaluation."""
-        system_prompt ="""You are a highly empathetic English phonetics and spelling tutor. 
+    system_prompt ="""You are a highly empathetic English phonetics and spelling tutor. 
     You will be given a TARGET WORD and the USER'S ATTEMPT.
     
     If the attempt is CORRECT:
