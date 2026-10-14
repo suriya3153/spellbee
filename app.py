@@ -55,11 +55,12 @@ if not api_key:
 client = SarvamAI(api_subscription_key=api_key)
 
 # -----------------------------------------------------------------------------
-# 2. SARVAM API WRAPPERS
+# 2. SARVAM API WRAPPERS (Cost-Optimized Models)
 # -----------------------------------------------------------------------------
 def generate_tts(text: str) -> str:
+    # Optimized to bulbul:v4-flash (₹1 per 1,000 characters)
     response = client.text_to_speech.convert_stream(
-        text=text, language_code="en-IN", speaker="ritu", model="bulbul:v3", pace=1
+        text=text, language_code="en-IN", speaker="ritu", model="bulbul:v4-flash", pace=1
     )
     tmp_path = os.path.join(tempfile.gettempdir(), f"spelling_{hash(text)}.mp3")
     if not os.path.exists(tmp_path):
@@ -69,27 +70,29 @@ def generate_tts(text: str) -> str:
     return tmp_path
 
 def evaluate_spelling(target: str, attempt: str) -> str:
+    # Strict brevity constraint keeps TTS audio under ~200 characters, saving 70%+ credits
     system_prompt = """You are a highly empathetic English phonetics and spelling tutor. 
     You will be given a TARGET WORD and the USER'S ATTEMPT.
     
     If the attempt is CORRECT:
     - Briefly congratulate them.
     
-    If the attempt is INCORRECT, you must analyze their specific mistake to reverse-engineer their thought process:
-    1. Validate their logic: Explain exactly WHY they likely spelled it that way based on phonetics. Address their specific letter choices (e.g., "I see exactly what you were thinking. You heard the strong 's' sound and wrote 'ss', and for the next part you wrote 'ce' because 'c' and 'e' often make that sound.")
-    2. Break down the attempt vs. the target: Compare the word syllable by syllable.
-    3. Highlight the correct parts: Tell them exactly which syllables or letters they got perfectly right.
-    4. Correct the wrong parts: Point out exactly which letters are wrong and explain the specific English spelling rule, silent letter, or root word that makes their phonetic guess incorrect. (e.g., "However, in this specific word, that 's' sound is actually made by an 'sc' together, and the vowel is an 'i' instead of an 'e'.")
-    5. Reveal the final spelling: Put it all together for them clearly.
-    6. Conversational Tone: Speak directly to the user's specific spelling attempt using a warm, encouraging, and natural tone suitable for Text-to-Speech."""
+    If the attempt is INCORRECT, reverse-engineer their thought process:
+    1. Validate their phonetic logic for specific wrong letters.
+    2. Break down the attempt vs. the target syllable by syllable.
+    3. Correct the wrong letters using the specific English rule.
+    4. Reveal the final spelling clearly.
+    
+    CRITICAL CONSTRAINT: Keep your entire response under 40 words so audio generation stays ultra-fast and cost-effective. Speak warmly and naturally for Text-to-Speech."""
 
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": f"TARGET WORD: {target}\nUSER'S ATTEMPT: {attempt}"}
     ]
 
+    # Optimized to glm-5.3-flash (Cheapest reasoning model: ₹13.5 in / ₹45 out per 1M tokens)
     response = client.chat.completions(
-        model="sarvam-105b-conversations", messages=messages, temperature=0.3
+        model="glm-5.3-flash", messages=messages, temperature=0.3
     )
     return response.choices[0].message.content
 
@@ -104,25 +107,22 @@ WORD_BANK = [
 
 def get_next_word():
     db = SessionLocal()
-    # Ensure all WORD_BANK words exist in the WordStat table
     for w in WORD_BANK:
         if not db.query(WordStat).filter_by(word=w).first():
             db.add(WordStat(word=w))
     db.commit()
 
     now = datetime.utcnow()
-    # SPACED REPETITION: Word must not have been solved correctly in the last 4 days
+    # Spaced repetition: words correctly spelled in the last 4 days are excluded
     cooldown_period = now - timedelta(days=4)
     
     candidates = db.query(WordStat).filter(
         (WordStat.last_correct == None) | (WordStat.last_correct < cooldown_period)
     ).all()
 
-    # If all words are recently solved, pick from the ones solved the longest time ago
     if not candidates:
         candidates = db.query(WordStat).order_by(WordStat.last_correct.asc()).limit(3).all()
         
-    # Prevent the exact same word from showing up back-to-back
     if 'current_word' in st.session_state and len(candidates) > 1:
         candidates = [c for c in candidates if c.word != st.session_state.current_word]
 
@@ -134,14 +134,12 @@ def save_attempt_to_db(word, typed, feedback, is_correct):
     db = SessionLocal()
     now = datetime.utcnow()
     
-    # Save the individual attempt to the relational table
     attempt = WordAttempt(
         word_id=word, typed_word=typed, ai_feedback=feedback, 
         is_correct=is_correct, timestamp=now
     )
     db.add(attempt)
     
-    # Update the global word status timestamp if correct
     if is_correct:
         w_stat = db.query(WordStat).filter_by(word=word).first()
         if w_stat:
@@ -183,7 +181,6 @@ if submitted and user_attempt:
         st.session_state.feedback_text = feedback
         st.session_state.feedback_audio = generate_tts(feedback)
         
-        # Save attempt to SQLite database via SQLAlchemy
         save_attempt_to_db(st.session_state.current_word, user_attempt, feedback, is_correct)
 
 if st.session_state.feedback_text:
@@ -209,7 +206,7 @@ elif st.session_state.feedback_text and not st.session_state.is_correct:
 # -----------------------------------------------------------------------------
 # 5. DATABASE HISTORY VIEW
 # -----------------------------------------------------------------------------
-with st.expander(f"📊 View My Learning History for x word"):
+with st.expander(f"📊 View My Learning History for '{st.session_state.current_word}'"):
     db = SessionLocal()
     attempts = db.query(WordAttempt).filter_by(word_id=st.session_state.current_word).order_by(WordAttempt.timestamp.desc()).all()
     if attempts:
