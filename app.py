@@ -209,7 +209,7 @@ elif st.session_state.feedback_text and not st.session_state.is_correct:
 # -----------------------------------------------------------------------------
 # 5. DATABASE HISTORY VIEW
 # -----------------------------------------------------------------------------
-with st.expander(f"📊 View My Learning History for '{st.session_state.current_word}'"):
+with st.expander(f"📊 View My Learning History for x word"):
     db = SessionLocal()
     attempts = db.query(WordAttempt).filter_by(word_id=st.session_state.current_word).order_by(WordAttempt.timestamp.desc()).all()
     if attempts:
