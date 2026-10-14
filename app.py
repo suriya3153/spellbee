@@ -18,13 +18,13 @@ Base = declarative_base()
 
 class WordStat(Base):
     __tablename__ = 'word_stats'
-    word = Column(String, primary key=True)
+    word = Column(String, primary_key=True)
     last_correct = Column(DateTime, nullable=True)
     attempts = relationship("WordAttempt", back_populates="word_stat", cascade="all, delete-orphan")
 
 class WordAttempt(Base):
     __tablename__ = 'word_attempts'
-    id = Column(Integer, primary key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
     word_id = Column(String, ForeignKey('word_stats.word'))
     typed_word = Column(String)
     ai_feedback = Column(String)
